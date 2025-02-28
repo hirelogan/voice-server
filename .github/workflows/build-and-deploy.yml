@@ -1,0 +1,95 @@
+env:
+  PROJECT_NAME: voice-server
+  PROJECT_URL: voice-server.hirelogan.com
+
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - master
+      - main
+
+permissions:
+  contents: read
+  packages: write
+  deployments: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.PROJECT_NAME }}:latest .
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push Docker image to registry
+        run: |
+          docker tag ${{ env.PROJECT_NAME }}:latest ghcr.io/${{ github.repository }}:latest
+          docker push ghcr.io/${{ github.repository }}:latest
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub Deploymen
+        uses: chrnorm/deployment-action@v2
+        id: deployment
+        with:
+          token: "${{ secrets.GITHUB_TOKEN }}"
+          environment: production
+          description: "Deploying to production environment"
+          initial-status: in_progress
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Deploy docker-compose.yml to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          port: ${{ secrets.SERVER_PORT }}
+          source: "docker-compose.yml"
+          target: "/${{ secrets.SERVER_USERNAME }}/${{ env.PROJECT_NAME }}/"
+      - name: Deploy server using Docker Compose
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          port: ${{ secrets.SERVER_PORT }}
+          command_timeout: "60m"
+          script: |
+            set -x
+            cd /${{ secrets.SERVER_USERNAME }}/${{ env.PROJECT_NAME }}/
+            echo "IMAGE_NAME=ghcr.io/${{ github.repository }}:latest" > .env
+            echo "ELEVENLABS_AGENT_ID=${{ secrets.ELEVENLABS_AGENT_ID }}" >> .env
+            echo "ELEVENLABS_API_KEY=${{ secrets.ELEVENLABS_API_KEY }}" >> .env
+            echo "TWILIO_ACCOUNT_SID=${{ secrets.TWILIO_ACCOUNT_SID }}" >> .env
+            echo "TWILIO_AUTH_TOKEN=${{ secrets.TWILIO_AUTH_TOKEN }}" >> .env
+            echo "TWILIO_PHONE_NUMBER=${{ secrets.TWILIO_PHONE_NUMBER }}" >> .env
+            echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker-compose pull
+            docker-compose up -d
+            docker system prune --all --force
+      - name: Update server deployment status (success)
+        if: ${{ success() }}
+        uses: chrnorm/deployment-status@v2
+        with:
+          token: "${{ secrets.GITHUB_TOKEN }}"
+          deployment-id: ${{ steps.deployment.outputs.deployment_id }}
+          state: "success"
+          environment-url: https://${{ env.PROJECT_URL }}/
+      - name: Update server deployment status (failure)
+        if: ${{ failure() }}
+        uses: chrnorm/deployment-status@v2
+        with:
+          token: "${{ secrets.GITHUB_TOKEN }}"
+          deployment-id: ${{ steps.deployment.outputs.deployment_id }}
+          state: "failure"
