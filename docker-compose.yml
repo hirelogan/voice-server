@@ -1,0 +1,12 @@
+services:
+  voice-server:
+    container_name: voice-server
+    image: ${IMAGE_NAME:-voice-server}
+    build:
+      context: .
+    ports:
+      - "8989:8000"
+    env_file:
+      - .env
+    restart: always
+    tty: true
