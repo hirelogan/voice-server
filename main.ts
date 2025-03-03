@@ -3,12 +3,72 @@
 import fastifyFormBody from "@fastify/formbody";
 import fastifyWs from "@fastify/websocket";
 import dotenv from "dotenv";
-import Fastify from "fastify";
+import Fastify, {
+  FastifyInstance,
+  FastifyReply,
+  FastifyRequest,
+} from "fastify";
 import Twilio from "twilio";
 import WebSocket from "ws";
 
 // Load environment variables from .env file
 dotenv.config();
+
+// Define interfaces for custom types
+interface OutboundCallRequest {
+  number: string;
+  prompt?: string;
+  first_message?: string;
+}
+
+interface TwimlQueryParams {
+  prompt?: string;
+  first_message?: string;
+}
+
+interface CustomParameters {
+  prompt?: string;
+  first_message?: string;
+}
+
+interface ElevenLabsConfig {
+  type: string;
+  dynamic_variables: {
+    user_name: string;
+    user_id: number;
+  };
+  conversation_config_override: {
+    agent: {
+      prompt: {
+        prompt: string;
+      };
+      first_message: string;
+    };
+  };
+}
+
+interface ElevenLabsAudioMessage {
+  user_audio_chunk: string;
+}
+
+interface ElevenLabsMessage {
+  type: string;
+  audio?: {
+    chunk: string;
+  };
+  audio_event?: {
+    audio_base_64: string;
+  };
+  ping_event?: {
+    event_id: string;
+  };
+  agent_response_event?: {
+    agent_response: string;
+  };
+  user_transcription_event?: {
+    user_transcript: string;
+  };
+}
 
 // Check for required environment variables
 const {
@@ -31,29 +91,33 @@ if (
 }
 
 // Initialize Fastify server
-const fastify = Fastify();
+const fastify: FastifyInstance = Fastify();
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
-const PORT = process.env.PORT || 8000;
+// Ensure PORT is a number
+const PORT: number = process.env.PORT ? parseInt(process.env.PORT, 10) : 8000;
 
 // Root route for health check
-fastify.get("/", async (_, reply) => {
+fastify.get("/", async (_: FastifyRequest, reply: FastifyReply) => {
   reply.send({ message: "Server is running" });
 });
 
 // Initialize Twilio client
-const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+const twilioClient = Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 // Helper function to get signed URL for authenticated conversations
-async function getSignedUrl() {
+async function getSignedUrl(): Promise<string> {
   try {
+    // Assert that ELEVENLABS_API_KEY is defined since we checked earlier
+    const apiKey = ELEVENLABS_API_KEY as string;
+
     const response = await fetch(
       `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${ELEVENLABS_AGENT_ID}`,
       {
         method: "GET",
         headers: {
-          "xi-api-key": ELEVENLABS_API_KEY,
+          "xi-api-key": apiKey,
         },
       }
     );
@@ -71,44 +135,49 @@ async function getSignedUrl() {
 }
 
 // Route to initiate outbound calls
-fastify.post("/outbound-call", async (request, reply) => {
-  const { number, prompt, first_message } = request.body;
+fastify.post<{ Body: OutboundCallRequest }>(
+  "/outbound-call",
+  async (request, reply: FastifyReply) => {
+    const { number, prompt, first_message } = request.body;
 
-  if (!number) {
-    return reply.code(400).send({ error: "Phone number is required" });
+    if (!number) {
+      return reply.code(400).send({ error: "Phone number is required" });
+    }
+
+    try {
+      const call = await twilioClient.calls.create({
+        from: TWILIO_PHONE_NUMBER,
+        to: number,
+        url: `https://${
+          request.headers.host
+        }/outbound-call-twiml?prompt=${encodeURIComponent(
+          prompt || ""
+        )}&first_message=${encodeURIComponent(first_message || "")}`,
+      });
+
+      reply.send({
+        success: true,
+        message: "Call initiated",
+        callSid: call.sid,
+      });
+    } catch (error) {
+      console.error("Error initiating outbound call:", error);
+      reply.code(500).send({
+        success: false,
+        error: "Failed to initiate call",
+      });
+    }
   }
-
-  try {
-    const call = await twilioClient.calls.create({
-      from: TWILIO_PHONE_NUMBER,
-      to: number,
-      url: `https://${
-        request.headers.host
-      }/outbound-call-twiml?prompt=${encodeURIComponent(
-        prompt
-      )}&first_message=${encodeURIComponent(first_message)}`,
-    });
-
-    reply.send({
-      success: true,
-      message: "Call initiated",
-      callSid: call.sid,
-    });
-  } catch (error) {
-    console.error("Error initiating outbound call:", error);
-    reply.code(500).send({
-      success: false,
-      error: "Failed to initiate call",
-    });
-  }
-});
+);
 
 // TwiML route for outbound calls
-fastify.all("/outbound-call-twiml", async (request, reply) => {
-  const prompt = request.query.prompt || "";
-  const first_message = request.query.first_message || "";
+fastify.all<{ Querystring: TwimlQueryParams }>(
+  "/outbound-call-twiml",
+  async (request, reply: FastifyReply) => {
+    const prompt = request.query.prompt || "";
+    const first_message = request.query.first_message || "";
 
-  const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
+    const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Connect>
         <Stream url="wss://${request.headers.host}/outbound-media-stream">
@@ -118,28 +187,29 @@ fastify.all("/outbound-call-twiml", async (request, reply) => {
         </Connect>
     </Response>`;
 
-  reply.type("text/xml").send(twimlResponse);
-});
+    reply.type("text/xml").send(twimlResponse);
+  }
+);
 
 // WebSocket route for handling media streams
-fastify.register(async (fastifyInstance) => {
+fastify.register(async (fastifyInstance: FastifyInstance) => {
   fastifyInstance.get(
     "/outbound-media-stream",
     { websocket: true },
-    (ws, req) => {
+    (ws: WebSocket, req) => {
       console.info("[Server] Twilio connected to outbound media stream");
 
       // Variables to track the call
-      let streamSid = null;
-      let callSid = null;
-      let elevenLabsWs = null;
-      let customParameters = null; // Add this to store parameters
+      let streamSid: string | null = null;
+      let callSid: string | null = null;
+      let elevenLabsWs: WebSocket | null = null;
+      let customParameters: CustomParameters | null = null;
 
       // Handle WebSocket errors
       ws.on("error", console.error);
 
       // Set up ElevenLabs connection
-      const setupElevenLabs = async () => {
+      const setupElevenLabs = async (): Promise<void> => {
         try {
           const signedUrl = await getSignedUrl();
           elevenLabsWs = new WebSocket(signedUrl);
@@ -147,8 +217,10 @@ fastify.register(async (fastifyInstance) => {
           elevenLabsWs.on("open", () => {
             console.log("[ElevenLabs] Connected to Conversational AI");
 
+            if (!elevenLabsWs) return;
+
             // Send initial configuration with prompt and first message
-            const initialConfig = {
+            const initialConfig: ElevenLabsConfig = {
               type: "conversation_initiation_client_data",
               dynamic_variables: {
                 user_name: "Angelo",
@@ -177,9 +249,9 @@ fastify.register(async (fastifyInstance) => {
             elevenLabsWs.send(JSON.stringify(initialConfig));
           });
 
-          elevenLabsWs.on("message", (data) => {
+          elevenLabsWs.on("message", (data: WebSocket.Data) => {
             try {
-              const message = JSON.parse(data);
+              const message = JSON.parse(data.toString()) as ElevenLabsMessage;
 
               switch (message.type) {
                 case "conversation_initiation_metadata":
@@ -226,7 +298,7 @@ fastify.register(async (fastifyInstance) => {
                   break;
 
                 case "ping":
-                  if (message.ping_event?.event_id) {
+                  if (message.ping_event?.event_id && elevenLabsWs) {
                     elevenLabsWs.send(
                       JSON.stringify({
                         type: "pong",
@@ -258,7 +330,7 @@ fastify.register(async (fastifyInstance) => {
             }
           });
 
-          elevenLabsWs.on("error", (error) => {
+          elevenLabsWs.on("error", (error: Error) => {
             console.error("[ElevenLabs] WebSocket error:", error);
           });
 
@@ -292,9 +364,9 @@ fastify.register(async (fastifyInstance) => {
       setupElevenLabs();
 
       // Handle messages from Twilio
-      ws.on("message", (message) => {
+      ws.on("message", (message: WebSocket.Data) => {
         try {
-          const msg = JSON.parse(message);
+          const msg = JSON.parse(message.toString());
           if (msg.event !== "media") {
             console.log(`[Twilio] Received event: ${msg.event}`);
           }
@@ -312,7 +384,7 @@ fastify.register(async (fastifyInstance) => {
 
             case "media":
               if (elevenLabsWs?.readyState === WebSocket.OPEN) {
-                const audioMessage = {
+                const audioMessage: ElevenLabsAudioMessage = {
                   user_audio_chunk: Buffer.from(
                     msg.media.payload,
                     "base64"
