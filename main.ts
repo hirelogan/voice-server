@@ -1,4 +1,5 @@
 // https://elevenlabs.io/docs/conversational-ai/guides/twilio/outbound-calling
+import { supabase } from "./db/client"
 import fastifyFormBody from "@fastify/formbody"
 import fastifyWs from "@fastify/websocket"
 import dotenv from "dotenv"

@@ -16,6 +16,7 @@
   "dependencies": {
     "@fastify/formbody": "^8.0.2",
     "@fastify/websocket": "^11.0.2",
+    "@supabase/supabase-js": "^2.49.1",
     "@trivago/prettier-plugin-sort-imports": "^5.2.2",
     "@types/ws": "^8.5.14",
     "dotenv": "^16.4.7",
