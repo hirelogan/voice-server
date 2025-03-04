@@ -1,5 +1,6 @@
 // https://elevenlabs.io/docs/conversational-ai/guides/twilio/outbound-calling
 import { supabase } from "./db/client"
+import { Prompts } from "./src/prompts"
 import fastifyFormBody from "@fastify/formbody"
 import fastifyWs from "@fastify/websocket"
 import dotenv from "dotenv"
@@ -7,19 +8,16 @@ import Fastify, { FastifyInstance, FastifyReply, FastifyRequest } from "fastify"
 import Twilio from "twilio"
 import WebSocket from "ws"
 
-// Load environment variables from .env file
 dotenv.config()
 
-// Define interfaces for custom types
+const callSessions = new Map()
+
 interface OutboundCallRequest {
-  number: string
-  prompt?: string
-  first_message?: string
+  call_event_id: string
 }
 
 interface TwimlQueryParams {
-  prompt?: string
-  first_message?: string
+  session_id: string
 }
 
 interface CustomParameters {
@@ -66,7 +64,6 @@ interface ElevenLabsMessage {
   }
 }
 
-// Check for required environment variables
 const { ELEVENLABS_API_KEY, ELEVENLABS_AGENT_ID, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER } =
   process.env
 
@@ -75,26 +72,20 @@ if (!ELEVENLABS_API_KEY || !ELEVENLABS_AGENT_ID || !TWILIO_ACCOUNT_SID || !TWILI
   throw new Error("Missing required environment variables")
 }
 
-// Initialize Fastify server
 const fastify: FastifyInstance = Fastify()
 fastify.register(fastifyFormBody)
 fastify.register(fastifyWs)
 
-// Ensure PORT is a number
 const PORT: number = process.env.PORT ? parseInt(process.env.PORT, 10) : 8000
 
-// Root route for health check
 fastify.get("/", async (_: FastifyRequest, reply: FastifyReply) => {
   reply.send({ message: "Server is running" })
 })
 
-// Initialize Twilio client
 const twilioClient = Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-// Helper function to get signed URL for authenticated conversations
 async function getSignedUrl(): Promise<string> {
   try {
-    // Assert that ELEVENLABS_API_KEY is defined since we checked earlier
     const apiKey = ELEVENLABS_API_KEY as string
 
     const response = await fetch(
@@ -119,21 +110,66 @@ async function getSignedUrl(): Promise<string> {
   }
 }
 
-// Route to initiate outbound calls
 fastify.post<{ Body: OutboundCallRequest }>("/outbound-call", async (request, reply: FastifyReply) => {
-  const { number, prompt, first_message } = request.body
+  const { call_event_id } = request.body
 
-  if (!number) {
-    return reply.code(400).send({ error: "Phone number is required" })
+  console.log("Call event ID:", call_event_id)
+
+  if (!call_event_id) {
+    return reply.code(400).send({ error: "Call event ID is required" })
   }
+
+  const { data: callData, error: callError } = await supabase
+    .from("event_call")
+    .select("*")
+    .eq("id", call_event_id)
+    .single()
+  if (callError) {
+    return reply.code(500).send({ error: `Failed to fetch call data: ${callError.message}` })
+  }
+  if (!callData) {
+    return reply.code(404).send({ error: `Call event with ID ${call_event_id} not found` })
+  }
+
+  const { data: personData, error: personError } = await supabase
+    .from("person")
+    .select("*")
+    .eq("id", callData.to_person)
+    .single()
+  if (personError) {
+    return reply.code(500).send({ error: `Failed to fetch person data: ${personError.message}` })
+  }
+  if (!personData) {
+    return reply.code(404).send({ error: `Person with ID ${callData.to_person} not found` })
+  }
+
+  const { data: chaseData, error: chaseError } = await supabase
+    .rpc("get_chases_with_events", {
+      chase_id_param: callData.chase_id,
+    })
+    .single()
+  if (chaseError) {
+    return reply.code(500).send({ error: `Failed to fetch chase data: ${chaseError.message}` })
+  }
+  if (!chaseData) {
+    return reply.code(404).send({ error: `Chase with ID ${callData.chase_id} not found` })
+  }
+
+  const prompts = new Prompts(chaseData, callData, personData)
+
+  const firstMessage = prompts.getFirstMessage()
+  const systemPrompt = prompts.getPrompt()
+
+  callSessions.set(call_event_id, {
+    prompt: systemPrompt || "",
+    first_message: firstMessage || "",
+  })
 
   try {
     const call = await twilioClient.calls.create({
       from: TWILIO_PHONE_NUMBER,
-      to: number,
-      url: `https://${request.headers.host}/outbound-call-twiml?prompt=${encodeURIComponent(
-        prompt || "",
-      )}&first_message=${encodeURIComponent(first_message || "")}`,
+      to: personData?.phone.replace(/\s/g, ""),
+      url: `https://${request.headers.host}/outbound-call-twiml?session_id=${call_event_id}`,
     })
 
     reply.send({
@@ -152,15 +188,13 @@ fastify.post<{ Body: OutboundCallRequest }>("/outbound-call", async (request, re
 
 // TwiML route for outbound calls
 fastify.all<{ Querystring: TwimlQueryParams }>("/outbound-call-twiml", async (request, reply: FastifyReply) => {
-  const prompt = request.query.prompt || ""
-  const first_message = request.query.first_message || ""
+  const { session_id } = request.query
 
   const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Connect>
         <Stream url="wss://${request.headers.host}/outbound-media-stream">
-            <Parameter name="prompt" value="${prompt}" />
-            <Parameter name="first_message" value="${first_message}" />
+            <Parameter name="session_id" value="${session_id}" />
         </Stream>
         </Connect>
     </Response>`
@@ -331,9 +365,17 @@ fastify.register(async (fastifyInstance: FastifyInstance) => {
           case "start":
             streamSid = msg.start.streamSid
             callSid = msg.start.callSid
-            customParameters = msg.start.customParameters // Store parameters
+            customParameters = msg.start.customParameters
+            const sessionId = msg.start.customParameters.session_id
+            const sessionData = callSessions.get(sessionId)
+            if (sessionData) {
+              customParameters = sessionData
+            } else {
+              console.error("Session data not found for session ID:", sessionId)
+            }
             console.log(`[Twilio] Stream started - StreamSid: ${streamSid}, CallSid: ${callSid}`)
             console.log("[Twilio] Start parameters:", customParameters)
+            callSessions.delete(sessionId)
             break
 
           case "media":
