@@ -1,5 +1,5 @@
-import { Database } from "../db/types"
-import { formatDate } from "./utils"
+import type { Database } from "./types/db"
+import { formatDate, toWords } from "./utils/formatter"
 
 export class Prompts {
   chase: Database["public"]["CompositeTypes"]["chase_with_events"]
@@ -17,22 +17,17 @@ export class Prompts {
   }
 
   getFirstMessage() {
-    const formattedAmount = new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: this.chase.invoice?.currency! || "USD",
-      maximumFractionDigits: 0,
-    }).format(Math.floor(this.chase.invoice?.amount!) || 0)
-    return `Hey ${this.person?.first_name!}, this is Logan from ${this.chase.invoice?.from_company?.name!}. I’m following up on the outstanding invoice for ${formattedAmount} which was due on ${formatDate(this.chase.invoice?.due_date!, false)}. I wanted to check if there’s anything holding up payment.`
+    return `Hey ${this.person!.first_name!}, this is Logan from ${this.chase.invoice!.from_company!.name!}. I’m following up on the outstanding invoice that was due on ${formatDate(this.chase.invoice!.due_date!, false, false)}`
   }
 
   getPrompt() {
-    let basePrompt = `You are Logan, an AI representative of ${this.chase.invoice?.from_company?.name!}.\n\nYou are calling ${this.person?.first_name!} ${this.person?.last_name!} from ${this.chase.invoice?.to_company?.name!} to follow up on an outstanding invoice for ${this.chase.invoice?.amount!} ${this.chase.invoice?.currency!} which was due on ${formatDate(this.chase.invoice?.due_date!, false)}. Your company, ${this.chase.invoice?.from_company?.name!}, provided following services:\n${this.chase.invoice?.service_description!}.\n\nYou should communicate in a ${this.chase.tone} tone.`
+    let basePrompt = `You are Logan, an AI representative of ${this.chase.invoice!.from_company!.name!}.\n\nYou are calling ${this.person!.first_name!} ${this.person!.last_name!} from ${this.chase.invoice!.to_company!.name!} to follow up on an outstanding invoice for ${toWords.convert(this.chase.invoice!.amount!)} which was due on ${formatDate(this.chase.invoice!.due_date!, false)}. Your company, ${this.chase.invoice!.from_company!.name!}, provided following services:\n${this.chase.invoice!.service_description!}.\n\nYou should communicate in a ${this.chase.tone} tone. You are not the assistant. You do not offer help. You should get the payment status from the person. End the call after scheduling the call back. Calculate the call back date and time based on current date and time, don't ask to specify. End the call after calling \`payment_confirmed\`. Do not say anything before calling tools, just call tools. Speak VERY shortly and conscise. Use as few words as possible as it is a phone call. Don't add unnecesarry details. Never reply with more than 1 sentence.`
 
     if (this.chase.prompt) {
       basePrompt += `\n\nHere is additional information left by your colleagues that might be helpful:\n${this.chase.prompt}`
     }
 
-    basePrompt += `\n\nNow is ${new Date().toUTCString()}.`
+    basePrompt += `\n\nCurrent date and time: ${formatDate(new Date().toISOString(), true)}`
 
     return basePrompt
   }
