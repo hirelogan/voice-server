@@ -5,8 +5,8 @@
   "main": "main.ts",
   "scripts": {
     "dev": "bun --watch src/index.ts",
-    "build": "tsc",
-    "start": "bun dist/index.js",
+    "build": "tsc --noEmit && esbuild src/index.ts --bundle --platform=node --outdir=dist",
+    "start": "node dist/index.js",
     "lint": "eslint . --ext .ts",
     "lint:fix": "eslint . --ext .ts --fix",
     "format": "prettier --write .",
@@ -40,6 +40,7 @@
     "@types/bun": "^1.2.7",
     "@typescript-eslint/eslint-plugin": "^8.28.0",
     "@typescript-eslint/parser": "^8.28.0",
+    "esbuild": "^0.25.1",
     "eslint": "^9.23.0",
     "eslint-config-prettier": "^10.1.1"
   },
