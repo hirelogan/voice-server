@@ -1,17 +1,17 @@
-FROM oven/bun:latest
+FROM node:latest
 
 WORKDIR /app
 
 COPY package.json bun.lock ./
 
-RUN bun install --frozen-lockfile
+RUN npm install
 
 COPY . .
 
-RUN bun run lint
+RUN npm run lint
 
-RUN bun run build
+RUN npm run build
 
 EXPOSE 8000
 
-CMD ["bun", "run", "start"]
+CMD ["npm", "run", "start"]
