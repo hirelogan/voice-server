@@ -1,68 +1,26 @@
-// https://elevenlabs.io/docs/conversational-ai/guides/twilio/outbound-calling
-import { supabase } from "./db/client"
-import { Prompts } from "./src/prompts"
+import { Prompts } from "./prompts"
+import { supabase } from "./supabase/client"
+import type {
+  CallParameters,
+  CallResultWithDetails,
+  ElevenLabsAudioMessage,
+  ElevenLabsMessage,
+  OutboundCallRequest,
+  TwimlQueryParams,
+} from "./types/call"
+import { formatDate } from "./utils/formatter"
+import logger from "./utils/logger"
 import fastifyFormBody from "@fastify/formbody"
 import fastifyWs from "@fastify/websocket"
+import { parse } from "date-fns"
+import { fromZonedTime } from "date-fns-tz"
 import dotenv from "dotenv"
-import Fastify, { FastifyInstance, FastifyReply, FastifyRequest } from "fastify"
+import type { ConversationInitiationClientData } from "elevenlabs/api"
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify"
 import Twilio from "twilio"
 import WebSocket from "ws"
 
 dotenv.config()
-
-const callSessions = new Map()
-
-interface OutboundCallRequest {
-  call_event_id: string
-}
-
-interface TwimlQueryParams {
-  session_id: string
-}
-
-interface CustomParameters {
-  prompt?: string
-  first_message?: string
-}
-
-interface ElevenLabsConfig {
-  type: string
-  dynamic_variables: {
-    user_name: string
-    user_id: number
-  }
-  conversation_config_override: {
-    agent: {
-      prompt: {
-        prompt: string
-      }
-      first_message: string
-    }
-  }
-}
-
-interface ElevenLabsAudioMessage {
-  user_audio_chunk: string
-}
-
-interface ElevenLabsMessage {
-  type: string
-  audio?: {
-    chunk: string
-  }
-  audio_event?: {
-    audio_base_64: string
-  }
-  ping_event?: {
-    event_id: string
-  }
-  agent_response_event?: {
-    agent_response: string
-  }
-  user_transcription_event?: {
-    user_transcript: string
-  }
-}
 
 const { ELEVENLABS_API_KEY, ELEVENLABS_AGENT_ID, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER } =
   process.env
@@ -71,6 +29,8 @@ if (!ELEVENLABS_API_KEY || !ELEVENLABS_AGENT_ID || !TWILIO_ACCOUNT_SID || !TWILI
   console.error("Missing required environment variables")
   throw new Error("Missing required environment variables")
 }
+
+const callSessions: Map<string, CallParameters> = new Map()
 
 const fastify: FastifyInstance = Fastify()
 fastify.register(fastifyFormBody)
@@ -113,7 +73,7 @@ async function getSignedUrl(): Promise<string> {
 fastify.post<{ Body: OutboundCallRequest }>("/outbound-call", async (request, reply: FastifyReply) => {
   const { call_event_id } = request.body
 
-  console.log("Call event ID:", call_event_id)
+  logger.info(`[Server] Received outbound call request with event ID: ${call_event_id}`)
 
   if (!call_event_id) {
     return reply.code(400).send({ error: "Call event ID is required" })
@@ -163,12 +123,17 @@ fastify.post<{ Body: OutboundCallRequest }>("/outbound-call", async (request, re
   callSessions.set(call_event_id, {
     prompt: systemPrompt || "",
     first_message: firstMessage || "",
+    person: personData,
   })
+
+  logger.info(
+    `[Server] Initiating outbound call to ${personData.first_name} ${personData.last_name} from ${chaseData.invoice?.to_company?.name} via ${personData.phone}`,
+  )
 
   try {
     const call = await twilioClient.calls.create({
       from: TWILIO_PHONE_NUMBER,
-      to: personData?.phone.replace(/\s/g, ""),
+      to: personData.phone.replace(/\s/g, ""),
       url: `https://${request.headers.host}/outbound-call-twiml?session_id=${call_event_id}`,
     })
 
@@ -204,14 +169,16 @@ fastify.all<{ Querystring: TwimlQueryParams }>("/outbound-call-twiml", async (re
 
 // WebSocket route for handling media streams
 fastify.register(async (fastifyInstance: FastifyInstance) => {
-  fastifyInstance.get("/outbound-media-stream", { websocket: true }, (ws: WebSocket, req) => {
+  fastifyInstance.get("/outbound-media-stream", { websocket: true }, (ws: WebSocket) => {
     console.info("[Server] Twilio connected to outbound media stream")
 
     // Variables to track the call
     let streamSid: string | null = null
     let callSid: string | null = null
     let elevenLabsWs: WebSocket | null = null
-    let customParameters: CustomParameters | null = null
+    let customParameters: CallParameters | null = null
+
+    let callResult: CallResultWithDetails = { status: "no_reply" }
 
     // Handle WebSocket errors
     ws.on("error", console.error)
@@ -223,17 +190,17 @@ fastify.register(async (fastifyInstance: FastifyInstance) => {
         elevenLabsWs = new WebSocket(signedUrl)
 
         elevenLabsWs.on("open", () => {
-          console.log("[ElevenLabs] Connected to Conversational AI")
+          logger.info("[ElevenLabs] Connected to Conversational AI")
 
           if (!elevenLabsWs) return
 
           // Send initial configuration with prompt and first message
-          const initialConfig: ElevenLabsConfig = {
+          const initialConfig: ConversationInitiationClientData = {
             type: "conversation_initiation_client_data",
-            dynamic_variables: {
-              user_name: "Angelo",
-              user_id: 1234,
-            },
+            // dynamic_variables: {
+            //   user_name: "Angelo",
+            //   user_id: 1234,
+            // },
             conversation_config_override: {
               agent: {
                 prompt: {
@@ -244,9 +211,8 @@ fastify.register(async (fastifyInstance: FastifyInstance) => {
             },
           }
 
-          console.log(
-            "[ElevenLabs] Sending initial config with prompt:",
-            initialConfig.conversation_config_override.agent.prompt.prompt,
+          logger.info(
+            `[ElevenLabs] Sending initial config with prompt: ${initialConfig.conversation_config_override!.agent!.prompt!.prompt}`,
           )
 
           // Send the configuration to ElevenLabs
@@ -259,7 +225,7 @@ fastify.register(async (fastifyInstance: FastifyInstance) => {
 
             switch (message.type) {
               case "conversation_initiation_metadata":
-                console.log("[ElevenLabs] Received initiation metadata")
+                logger.info("[ElevenLabs] Received initiation metadata")
                 break
 
               case "audio":
@@ -284,7 +250,7 @@ fastify.register(async (fastifyInstance: FastifyInstance) => {
                     ws.send(JSON.stringify(audioData))
                   }
                 } else {
-                  console.log("[ElevenLabs] Received audio but no StreamSid yet")
+                  logger.info("[ElevenLabs] Received audio but no StreamSid yet")
                 }
                 break
 
@@ -311,15 +277,88 @@ fastify.register(async (fastifyInstance: FastifyInstance) => {
                 break
 
               case "agent_response":
-                console.log(`[Twilio] Agent response: ${message.agent_response_event?.agent_response}`)
+                logger.info(`[Twilio] Agent response: ${message.agent_response_event?.agent_response}`)
                 break
 
               case "user_transcript":
-                console.log(`[Twilio] User transcript: ${message.user_transcription_event?.user_transcript}`)
+                logger.info(`[Twilio] User transcript: ${message.user_transcription_event?.user_transcript}`)
                 break
 
+              case "client_tool_call": {
+                const { client_tool_call } = message
+                const { tool_name, tool_call_id, parameters } = client_tool_call!
+                logger.info(`[ElevenLabs] Received client tool call: ${tool_name} with parameters:`)
+                console.log(parameters)
+
+                if (!elevenLabsWs) {
+                  console.error("[ElevenLabs] WebSocket not connected")
+                  return
+                }
+
+                try {
+                  if (tool_name === "schedule_call_back") {
+                    const { datetime_str } = parameters
+                    if (!datetime_str) {
+                      throw new Error("Datetime is required")
+                    }
+
+                    const parsedDate = parse(datetime_str, "yyyy-MM-dd h:mm a", new Date())
+                    const utcDate = fromZonedTime(parsedDate, "UTC")
+
+                    callResult = { status: "reschedule", rescheduleDate: utcDate }
+                    elevenLabsWs.send(
+                      JSON.stringify({
+                        type: "client_tool_result",
+                        tool_call_id,
+                        result: `Reply exactly with phrase: 'No worries at all. Speak shortly!' and end the call using \`end_call\` tool.`,
+                        is_error: false,
+                      }),
+                    )
+                  } else if (tool_name === "payment_confirmed") {
+                    const { date } = parameters
+                    if (!date) {
+                      throw new Error("Date is required")
+                    }
+
+                    const parsedDate = parse(date, "yyyy-MM-dd", new Date())
+                    const utcDate = fromZonedTime(parsedDate, "UTC")
+                    callResult = { status: "agreed_to_pay", paymentDate: utcDate }
+                    elevenLabsWs.send(
+                      JSON.stringify({
+                        type: "client_tool_result",
+                        tool_call_id,
+                        result: `Reply exactly with phrase: 'Thanks for confirming the payment until ${formatDate(utcDate.toISOString(), false, false)} ${customParameters?.person?.first_name}. Have a great day!' and end the call using \`end_call\` tool.`,
+                        is_error: false,
+                      }),
+                    )
+                  } else if (tool_name === "financial_hardship") {
+                    callResult = { status: "financial_hardship" }
+                    elevenLabsWs.send(
+                      JSON.stringify({
+                        type: "client_tool_result",
+                        tool_call_id,
+                        result: `Reply exactly with phrase: 'I understand ${customParameters?.person?.first_name}. I'll let my team know of the situation and will follow up on possible solutions. Have a great day!' and end the call using \`end_call\` tool.`,
+                        is_error: false,
+                      }),
+                    )
+                  } else {
+                    throw new Error(`Unhandled client tool call: ${tool_name}`)
+                  }
+                } catch (error) {
+                  console.error("[ElevenLabs] Error processing client tool call:", error)
+                  elevenLabsWs.send(
+                    JSON.stringify({
+                      type: "client_tool_result",
+                      tool_call_id,
+                      result: JSON.stringify(error),
+                      is_error: true,
+                    }),
+                  )
+                }
+                break
+              }
               default:
-                console.log(`[ElevenLabs] Unhandled message type: ${message.type}`)
+                logger.info(`[ElevenLabs] Unhandled message type: ${message.type}`)
             }
           } catch (error) {
             console.error("[ElevenLabs] Error processing message:", error)
@@ -331,22 +370,27 @@ fastify.register(async (fastifyInstance: FastifyInstance) => {
         })
 
         elevenLabsWs.on("close", () => {
-          console.log("[ElevenLabs] Disconnected")
+          logger.info("[ElevenLabs] Disconnected")
 
           // End the Twilio call if we have a callSid
           if (callSid) {
-            console.log(`[Twilio] Ending call ${callSid} due to ElevenLabs disconnection`)
+            logger.info(`[Twilio] Ending call ${callSid} due to ElevenLabs disconnection`)
 
-            // Hang up the call using Twilio API
-            twilioClient
-              .calls(callSid)
-              .update({ status: "completed" })
-              .then(() => console.log(`[Twilio] Successfully ended call ${callSid}`))
-              .catch((error) => console.error(`[Twilio] Error ending call ${callSid}:`, error))
+            // // sleep for 1 second
+            setTimeout(() => {
+              twilioClient
+                .calls(callSid!)
+                .update({ status: "completed" })
+                .then(() => logger.info(`[Twilio] Successfully ended call ${callSid}`))
+                .catch((error) => console.error(`[Twilio] Error ending call ${callSid}:`, error))
+            }, 1000)
+
+            logger.info(`[Server] Call result: ${JSON.stringify(callResult)}`)
           }
         })
       } catch (error) {
-        console.error("[ElevenLabs] Setup error:", error)
+        logger.error("[ElevenLabs] Setup error:")
+        console.error(error)
       }
     }
 
@@ -358,11 +402,11 @@ fastify.register(async (fastifyInstance: FastifyInstance) => {
       try {
         const msg = JSON.parse(message.toString())
         if (msg.event !== "media") {
-          console.log(`[Twilio] Received event: ${msg.event}`)
+          logger.info(`[Twilio] Received event: ${msg.event}`)
         }
 
         switch (msg.event) {
-          case "start":
+          case "start": {
             streamSid = msg.start.streamSid
             callSid = msg.start.callSid
             customParameters = msg.start.customParameters
@@ -373,11 +417,11 @@ fastify.register(async (fastifyInstance: FastifyInstance) => {
             } else {
               console.error("Session data not found for session ID:", sessionId)
             }
-            console.log(`[Twilio] Stream started - StreamSid: ${streamSid}, CallSid: ${callSid}`)
+            logger.info(`[Twilio] Stream started - StreamSid: ${streamSid}, CallSid: ${callSid}`)
             console.log("[Twilio] Start parameters:", customParameters)
             callSessions.delete(sessionId)
             break
-
+          }
           case "media":
             if (elevenLabsWs?.readyState === WebSocket.OPEN) {
               const audioMessage: ElevenLabsAudioMessage = {
@@ -388,23 +432,24 @@ fastify.register(async (fastifyInstance: FastifyInstance) => {
             break
 
           case "stop":
-            console.log(`[Twilio] Stream ${streamSid} ended`)
+            logger.info(`[Twilio] Stream ${streamSid} ended`)
             if (elevenLabsWs?.readyState === WebSocket.OPEN) {
               elevenLabsWs.close()
             }
             break
 
           default:
-            console.log(`[Twilio] Unhandled event: ${msg.event}`)
+            logger.info(`[Twilio] Unhandled event: ${msg.event}`)
         }
       } catch (error) {
-        console.error("[Twilio] Error processing message:", error)
+        logger.error("[Twilio] Error processing message:")
+        console.error(error)
       }
     })
 
     // Handle WebSocket closure
     ws.on("close", () => {
-      console.log("[Twilio] Client disconnected")
+      logger.info("[Twilio] Client disconnected")
       if (elevenLabsWs?.readyState === WebSocket.OPEN) {
         elevenLabsWs.close()
       }
@@ -415,8 +460,9 @@ fastify.register(async (fastifyInstance: FastifyInstance) => {
 // Start the Fastify server
 fastify.listen({ host: "0.0.0.0", port: PORT }, (err) => {
   if (err) {
-    console.error("Error starting server:", err)
+    logger.error("Error starting server:")
+    console.error(err)
     process.exit(1)
   }
-  console.log(`[Server] Listening on port ${PORT}`)
+  logger.info(`[Server] Listening on port ${PORT}`)
 })
