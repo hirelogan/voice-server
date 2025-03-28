@@ -1,8 +1,7 @@
-// eslint-disable-next-line
-import type { ConversationInitiationClientData } from "elevenlabs/api"
+// Import the original type
+import type { ConversationInitiationClientDataRequestInput } from "elevenlabs/api"
 
-declare module "elevenlabs/api" {
-  interface ConversationInitiationClientData {
-    type: string
-  }
+// Create a new type with the additional field
+export type MyConversationInitiationClientDataRequestInput = ConversationInitiationClientDataRequestInput & {
+  type: string
 }

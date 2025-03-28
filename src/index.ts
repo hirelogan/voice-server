@@ -8,6 +8,7 @@ import type {
   OutboundCallRequest,
   TwimlQueryParams,
 } from "./types/call"
+import type { MyConversationInitiationClientDataRequestInput } from "./types/elevenlabs"
 import { formatDate } from "./utils/formatter"
 import logger from "./utils/logger"
 import fastifyFormBody from "@fastify/formbody"
@@ -15,7 +16,6 @@ import fastifyWs from "@fastify/websocket"
 import { parse } from "date-fns"
 import { fromZonedTime } from "date-fns-tz"
 import dotenv from "dotenv"
-import type { ConversationInitiationClientData } from "elevenlabs/api"
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify"
 import Twilio from "twilio"
 import WebSocket from "ws"
@@ -195,7 +195,7 @@ fastify.register(async (fastifyInstance: FastifyInstance) => {
           if (!elevenLabsWs) return
 
           // Send initial configuration with prompt and first message
-          const initialConfig: ConversationInitiationClientData = {
+          const initialConfig: MyConversationInitiationClientDataRequestInput = {
             type: "conversation_initiation_client_data",
             // dynamic_variables: {
             //   user_name: "Angelo",
