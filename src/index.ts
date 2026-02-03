@@ -310,7 +310,7 @@ fastify.register(async (fastifyInstance: FastifyInstance) => {
                       JSON.stringify({
                         type: "client_tool_result",
                         tool_call_id,
-                        result: `Reply exactly with phrase: 'No worries at all. Speak shortly!' and end the call using \`end_call\` tool.`,
+                        result: `Reply exactly with phrase: 'No worries at all. Speak shortly!'`,
                         is_error: false,
                       }),
                     )
@@ -327,7 +327,8 @@ fastify.register(async (fastifyInstance: FastifyInstance) => {
                       JSON.stringify({
                         type: "client_tool_result",
                         tool_call_id,
-                        result: `Reply exactly with phrase: 'Thanks for confirming the payment until ${formatDate(utcDate.toISOString(), false, false)} ${customParameters?.person?.first_name}. Have a great day!' and end the call using \`end_call\` tool.`,
+                        result: `Reply exactly with phrase: 'Thanks for confirming the payment until ${formatDate(utcDate.toISOString(), false, false)} ${customParameters?.person?.first_name}. Have a great day!'`,
+                        // result: `Reply exactly with phrase: 'Thanks for confirming the payment until ${formatDate(utcDate.toISOString(), false, false)} ${customParameters?.person?.first_name}. Have a great day!' and end the call using \`end_call\` tool.`,
                         is_error: false,
                       }),
                     )
